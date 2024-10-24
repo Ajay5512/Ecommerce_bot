@@ -33,14 +33,7 @@ class FeedbackManager:
     """Manages user feedback in PostgreSQL."""
     
     def add_feedback(self, conversation_id: str, feedback: int, comment: str = "") -> bool:
-        """Stores feedback for a specific conversation.
-        Args:
-            conversation_id: Unique identifier for the conversation
-            feedback: 1 for thumbs up, 0 for thumbs down
-            comment: Optional user comment
-        Returns:
-            bool: True if feedback was stored successfully
-        """
+        """Stores feedback for a specific conversation."""
         conn = get_db_connection()
         if conn is None:
             return False
@@ -180,10 +173,8 @@ class RAGSystem:
                     print("Please enter either 1 for thumbs up or 0 for thumbs down.")
                     continue
                 
-                # Get optional comment
                 comment = input("Additional comments (optional): ").strip()
                 
-                # Store feedback
                 success = self.memory.feedback_manager.add_feedback(
                     conversation_id=conversation_id,
                     feedback=int(feedback),
@@ -191,7 +182,6 @@ class RAGSystem:
                 )
                 
                 if success:
-                    # Get and display current stats
                     stats = self.memory.feedback_manager.get_feedback_stats()
                     return f"Thank you for your feedback! Current stats: 👍 {stats['thumbs_up']} | 👎 {stats['thumbs_down']}"
                 else:
@@ -287,6 +277,9 @@ class RAGSystem:
         
         response, usage_stats, response_time = self.generate_response(prompt, model)
         
+        # Evaluate the response using LLM
+        relevance, explanation, eval_usage = evaluate_relevance(query, response, self.groq_client, model)
+        
         self.memory.add_message("assistant", response, metadata)
         
         return {
@@ -296,17 +289,56 @@ class RAGSystem:
             "answer": response,
             "model_used": model,
             "response_time": response_time,
-            "relevance": "generated",
-            "relevance_explanation": "Response generated based on matching products.",
+            "relevance": relevance,
+            "relevance_explanation": explanation,
             "prompt_tokens": usage_stats["prompt_tokens"],
             "completion_tokens": usage_stats["completion_tokens"],
             "total_tokens": usage_stats["total_tokens"],
-            "eval_prompt_tokens": 0,
-            "eval_completion_tokens": 0,
-            "eval_total_tokens": 0,
-            "openai_cost": 0,
+            "eval_prompt_tokens": eval_usage["prompt_tokens"],
+            "eval_completion_tokens": eval_usage["completion_tokens"],
+            "eval_total_tokens": eval_usage["total_tokens"],
             "timestamp": datetime.now(ZoneInfo("UTC"))
         }
+
+def evaluate_relevance(question: str, answer: str, groq_client, model_choice: str = 'llama-3.1-70b-versatile') -> Tuple[str, str, Dict[str, Any]]:
+    """Evaluates the relevance of an answer using the Groq LLM."""
+    prompt_template = """
+    You are an expert evaluator for a Retrieval-Augmented Generation (RAG) system.
+    Your task is to analyze the relevance of the generated answer to the given question.
+    Based on the relevance of the generated answer, you will classify it
+    as "NON_RELEVANT", "PARTLY_RELEVANT", or "RELEVANT".
+
+    Here is the data for evaluation:
+
+    Question: {question}
+    Generated Answer: {answer}
+
+    Please analyze the content and context of the generated answer in relation to the question
+    and provide your evaluation in parsable JSON format:
+
+    {{
+      "Relevance": "NON_RELEVANT" | "PARTLY_RELEVANT" | "RELEVANT",
+      "Explanation": "[Provide a brief explanation for your evaluation]"
+    }}
+    """.strip()
+
+    prompt = prompt_template.format(question=question, answer=answer)
+
+    start_time = time.time()
+    response = groq_client.chat.completions.create(
+        model=model_choice,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    end_time = time.time()
+    
+    evaluation_response = response.choices[0].message.content
+    usage_stats = response.usage.to_dict()
+
+    try:
+        json_eval = json.loads(evaluation_response)
+        return json_eval['Relevance'], json_eval['Explanation'], usage_stats
+    except json.JSONDecodeError:
+        return "UNKNOWN", "Failed to parse evaluation", usage_stats
 
 def calculate_groq_cost(tokens: Dict[str, Any], pricing: Dict[str, float] = None) -> float:
     """Calculates cost based on token usage for Groq LLM."""
@@ -322,7 +354,6 @@ def calculate_groq_cost(tokens: Dict[str, Any], pricing: Dict[str, float] = None
     return cost
 
 def main():
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description='E-commerce Product Assistant')
     parser.add_argument('--model', type=str, default='llama-3.1-70b-versatile',
                        help='Model to use for generating responses')
@@ -333,13 +364,11 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize the RAG system
     rag = RAGSystem(
         es_url=args.elastic_url,
         model_name='multi-qa-MiniLM-L6-cos-v1',
         memory_expiration=3600
     )
-    
     print("E-commerce Product Assistant")
     print("Type 'quit' or 'exit' to end the session")
     print("Type 'clear' to clear conversation history")
@@ -371,14 +400,25 @@ def main():
             # Print the response
             print("\nAssistant:", result['answer'])
             
-            # Print metadata
-            print("\nMetadata:")
+            # Print evaluation results
+            print("\n" + "="*20 + " Response Evaluation " + "="*20)
+            print(f"Relevance: {result['relevance']}")
+            print(f"Explanation: {result['relevance_explanation']}")
+            
+            # Print detailed metadata
+            print("\n" + "="*20 + " Response Metrics " + "="*20)
             print(f"Response time: {result['response_time']:.2f} seconds")
-            print(f"Total tokens: {result['total_tokens']}")
-            print(f"Estimated cost: ${calculate_groq_cost(result):.4f}")
+            print(f"Response tokens: {result['total_tokens']}")
+            print(f"Evaluation tokens: {result['eval_total_tokens']}")
+            total_cost = calculate_groq_cost({
+                'prompt_tokens': result['prompt_tokens'] + result['eval_prompt_tokens'],
+                'completion_tokens': result['completion_tokens'] + result['eval_completion_tokens']
+            })
+            print(f"Total estimated cost: ${total_cost:.4f}")
             
             # Get feedback
             feedback_result = rag.get_feedback(result['id'])
+            print("\n" + "="*20 + " User Feedback " + "="*20)
             print(feedback_result)
             
         except Exception as e:

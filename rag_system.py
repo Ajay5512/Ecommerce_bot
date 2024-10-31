@@ -32,6 +32,10 @@ def get_db_connection():
 class FeedbackManager:
     """Manages user feedback in PostgreSQL."""
     
+    def __init__(self):
+        """Initialize FeedbackManager."""
+        self.tz = ZoneInfo(os.getenv("TZ", "UTC"))
+    
     def add_feedback(self, conversation_id: str, feedback: int, comment: str = "") -> bool:
         """Stores feedback for a specific conversation."""
         conn = get_db_connection()
@@ -39,15 +43,24 @@ class FeedbackManager:
             return False
         
         try:
+            timestamp = datetime.now(self.tz)
             with conn.cursor() as cur:
+                # First verify the conversation exists
+                cur.execute("SELECT id FROM conversations WHERE id = %s", (conversation_id,))
+                if cur.fetchone() is None:
+                    logging.error(f"Conversation {conversation_id} not found")
+                    return False
+                
+                # Insert the feedback
                 cur.execute("""
-                    INSERT INTO feedback (conversation_id, feedback, comment, created_at)
+                    INSERT INTO feedback (conversation_id, feedback, comment, timestamp)
                     VALUES (%s, %s, %s, %s)
-                """, (conversation_id, feedback, comment, datetime.now()))
+                """, (conversation_id, feedback, comment, timestamp))
                 conn.commit()
                 return True
         except Exception as e:
             logging.error(f"Error storing feedback: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()

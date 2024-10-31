@@ -37,12 +37,11 @@ def init_db():
     
     try:
         with conn.cursor() as cur:
-            cur.execute("DROP TABLE IF EXISTS feedback")
-            cur.execute("DROP TABLE IF EXISTS conversations")
-            
+            # Create conversations table with session_id
             cur.execute("""
-                CREATE TABLE conversations (
+                CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
                     question TEXT NOT NULL,
                     answer TEXT NOT NULL,
                     model_used TEXT NOT NULL,
@@ -60,12 +59,18 @@ def init_db():
                 )
             """)
             
+            # Create feedback table with comment field and timestamp
             cur.execute("""
-                CREATE TABLE feedback (
+                CREATE TABLE IF NOT EXISTS feedback (
                     id SERIAL PRIMARY KEY,
                     conversation_id TEXT REFERENCES conversations(id),
                     feedback INTEGER NOT NULL,
-                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL
+                    comment TEXT,
+                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                    CONSTRAINT fk_conversation
+                        FOREIGN KEY(conversation_id)
+                        REFERENCES conversations(id)
+                        ON DELETE CASCADE
                 )
             """)
         conn.commit()
@@ -75,7 +80,7 @@ def init_db():
         conn.rollback()
     finally:
         conn.close()
-
+        
 def save_conversation(conversation_id, question, answer_data, timestamp=None):
     """Save a conversation to the database."""
     if timestamp is None:
